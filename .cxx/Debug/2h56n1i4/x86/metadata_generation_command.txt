@@ -1,0 +1,19 @@
+                    -H/home/youyou/rustdesk/flutter/android/monitor-runtime/src/main/cpp
+-DCMAKE_SYSTEM_NAME=Android
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+-DCMAKE_SYSTEM_VERSION=26
+-DANDROID_PLATFORM=android-26
+-DANDROID_ABI=x86
+-DCMAKE_ANDROID_ARCH_ABI=x86
+-DANDROID_NDK=/home/youyou/Android/Sdk/ndk/23.1.7779620
+-DCMAKE_ANDROID_NDK=/home/youyou/Android/Sdk/ndk/23.1.7779620
+-DCMAKE_TOOLCHAIN_FILE=/home/youyou/Android/Sdk/ndk/23.1.7779620/build/cmake/android.toolchain.cmake
+-DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
+-DCMAKE_CXX_FLAGS=-std=c++17
+-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/youyou/rustdesk/flutter/build/monitor-runtime/intermediates/cxx/Debug/2h56n1i4/obj/x86
+-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/youyou/rustdesk/flutter/build/monitor-runtime/intermediates/cxx/Debug/2h56n1i4/obj/x86
+-DCMAKE_BUILD_TYPE=Debug
+-B/home/youyou/rustdesk/flutter/android/monitor-runtime/.cxx/Debug/2h56n1i4/x86
+-GNinja
+                    Build command args: []
+                    Version: 2

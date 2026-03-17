@@ -1,0 +1,3 @@
+/home/youyou/rustdesk/flutter/android/monitor-runtime/.cxx/Debug/2h56n1i4/arm64-v8a/CMakeFiles/yoyo_runtime.dir
+/home/youyou/rustdesk/flutter/android/monitor-runtime/.cxx/Debug/2h56n1i4/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/youyou/rustdesk/flutter/android/monitor-runtime/.cxx/Debug/2h56n1i4/arm64-v8a/CMakeFiles/rebuild_cache.dir
