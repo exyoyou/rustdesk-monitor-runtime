@@ -2,8 +2,19 @@ package youyou.monitor.runtime
 
 import android.content.Context
 import android.hardware.HardwareBuffer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import org.koin.core.context.GlobalContext
+import youyou.monitor.amap.AMapTrackOptions
+import youyou.monitor.amap.AmapTrackCollector
+import youyou.monitor.config.model.LocationTrackConfig
 import youyou.monitor.config.repository.ConfigRepository
 import youyou.monitor.logger.Log
 import youyou.monitor.screen.MonitorService
@@ -27,6 +38,12 @@ object MonitorRuntime {
     private var appContext: Context? = null
     private var monitorService: MonitorService? = null
     private var syncCoordinator: MonitorSyncCoordinator? = null
+    private var locationTrackManager: LocationTrackManager? = null
+    private var amapTrackCollector: AmapTrackCollector? = null
+    private var amapTrackOptions: AMapTrackOptions = AMapTrackOptions()
+    private var isAmapTrackStarted: Boolean = false
+    private var locationConfigScope: CoroutineScope? = null
+    private var locationConfigJob: Job? = null
 
     private var pendingDeviceIdProvider: (() -> String)? = null
     private var pendingRootDirChanged: ((String) -> Unit)? = null
@@ -65,6 +82,27 @@ object MonitorRuntime {
                 scheduledTaskManager
             )
 
+            locationTrackManager = LocationTrackManager(storageRepository)
+            amapTrackCollector = AmapTrackCollector(applicationContext)
+
+            val cfgScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+            locationConfigScope = cfgScope
+            locationConfigJob = cfgScope.launch {
+                configRepository.getConfigFlow()
+                    .map { it.locationTrack }
+                    .distinctUntilChanged()
+                    .collectLatest { cfg ->
+                        applyLocationTrackConfig(cfg)
+                    }
+            }
+
+            scheduledTaskManager.setTrackReportProvider {
+                locationTrackManager?.getPendingReportFiles() ?: emptyList()
+            }
+            scheduledTaskManager.setOnTrackReportUploaded { file ->
+                locationTrackManager?.onReportUploaded(file)
+            }
+
             configureDeviceIdProviderLocked(pendingDeviceIdProvider)
             syncCoordinator?.setOnRootDirChanged(pendingRootDirChanged)
 
@@ -100,6 +138,14 @@ object MonitorRuntime {
                 Log.w(TAG, "Stop monitor service failed: ${e.message}")
             }
 
+            try {
+                amapTrackCollector?.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Stop amap collector failed: ${e.message}")
+            }
+
+            isAmapTrackStarted = false
+
             started = false
         }
     }
@@ -128,6 +174,93 @@ object MonitorRuntime {
 
     fun onFrameAvailable(buffer: ByteBuffer, width: Int, height: Int, scale: Int = 1) {
         monitorService?.onFrameAvailable(buffer, width, height, scale)
+    }
+
+    fun recordTrackPoint(
+        latitude: Double,
+        longitude: Double,
+        timestampMs: Long = System.currentTimeMillis(),
+        accuracyMeters: Float? = null,
+        poiName: String? = null
+    ) {
+        locationTrackManager?.recordPoint(
+            latitude = latitude,
+            longitude = longitude,
+            timestampMs = timestampMs,
+            accuracyMeters = accuracyMeters,
+            poiName = poiName
+        )
+    }
+
+    fun generateDailyTrackReport(day: String? = null): String? {
+        return locationTrackManager?.generateDailyReport(day)?.absolutePath
+    }
+
+    private fun startAmapTrackInternal(options: AMapTrackOptions) {
+        synchronized(lock) {
+            ensureInitializedLocked()
+            amapTrackOptions = options
+            isAmapTrackStarted = true
+        }
+        amapTrackCollector?.start(amapTrackOptions) { point ->
+            recordTrackPoint(
+                latitude = point.latitude,
+                longitude = point.longitude,
+                timestampMs = point.timestampMs,
+                accuracyMeters = point.accuracyMeters,
+                poiName = point.poiName
+            )
+        }
+    }
+
+    fun startAmapTrack(
+        intervalMs: Long = 10_000L,
+        needAddress: Boolean = true,
+        onceLocation: Boolean = false
+    ) {
+        startAmapTrackInternal(
+            AMapTrackOptions(
+                intervalMs = intervalMs,
+                needAddress = needAddress,
+                onceLocation = onceLocation
+            )
+        )
+    }
+
+    fun stopAmapTrack() {
+        synchronized(lock) {
+            isAmapTrackStarted = false
+        }
+        amapTrackCollector?.stop()
+    }
+
+    private fun applyLocationTrackConfig(config: LocationTrackConfig) {
+        val options = AMapTrackOptions(
+            intervalMs = config.movingIntervalMs,
+            needAddress = config.needAddress,
+            onceLocation = false,
+            adaptiveInterval = config.adaptiveInterval,
+            movingIntervalMs = config.movingIntervalMs,
+            staticIntervalMs = config.staticIntervalMs,
+            movementThresholdMeters = config.movementThresholdMeters,
+            maxAcceptAccuracyMeters = config.maxAcceptAccuracyMeters
+        )
+
+        val shouldRestart = synchronized(lock) {
+            locationTrackManager?.updateConfig(config)
+            val changed = options != amapTrackOptions
+            amapTrackOptions = options
+            changed && isAmapTrackStarted
+        }
+
+        if (shouldRestart) {
+            try {
+                amapTrackCollector?.stop()
+            } catch (_: Exception) {
+            }
+            startAmapTrackInternal(options)
+            Log.i(TAG, "Location track config changed, collector restarted")
+        }
     }
 
     fun writeHardwareBufferToBuffer(
