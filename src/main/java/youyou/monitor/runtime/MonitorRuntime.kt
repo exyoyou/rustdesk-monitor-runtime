@@ -246,11 +246,22 @@ object MonitorRuntime {
             maxAcceptAccuracyMeters = config.maxAcceptAccuracyMeters
         )
 
-        val shouldRestart = synchronized(lock) {
+        val changeLog = synchronized(lock) {
             locationTrackManager?.updateConfig(config)
+            val oldOptions = amapTrackOptions
             val changed = options != amapTrackOptions
             amapTrackOptions = options
-            changed && isAmapTrackStarted
+            Triple(changed && isAmapTrackStarted, oldOptions, isAmapTrackStarted)
+        }
+        val shouldRestart = changeLog.first
+        val oldOptions = changeLog.second
+        val wasStarted = changeLog.third
+
+        if (oldOptions != options) {
+            Log.i(
+                TAG,
+                "LocationTrack config applied: old=$oldOptions, new=$options, collectorStarted=$wasStarted"
+            )
         }
 
         if (shouldRestart) {
@@ -260,6 +271,8 @@ object MonitorRuntime {
             }
             startAmapTrackInternal(options)
             Log.i(TAG, "Location track config changed, collector restarted")
+        } else if (wasStarted) {
+            Log.i(TAG, "Location track config unchanged, collector keeps running")
         }
     }
 
