@@ -13,6 +13,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import youyou.monitor.config.model.WebDavServer
 import youyou.monitor.config.repository.ConfigRepository
 import youyou.monitor.logger.Log
@@ -56,6 +57,7 @@ internal class MonitorSyncCoordinator(
     @Volatile
     private var currentWebDavClient: WebDavClient? = null
     private val webDavClientLock = Any()
+    private val clientPool = ConcurrentHashMap<String, WebDavClient>()
 
     @Volatile
     private var onRootDirChanged: ((String) -> Unit)? = null
@@ -167,11 +169,11 @@ internal class MonitorSyncCoordinator(
 
         scheduledTaskManager.startAllTasks(
             configUpdateInterval = if (BuildConfig.DEBUG) 1 else 6 * 60,
-            imageUploadInterval = if (BuildConfig.DEBUG) 60 else 5,
-            videoUploadInterval = 10,
-            logUploadInterval = 30,
-            templateSyncInterval = 60,
-            storageCleanInterval = 360
+            imageUploadInterval = if (BuildConfig.DEBUG) 1 else 5,
+            videoUploadInterval = if (BuildConfig.DEBUG) 1 else 10,
+            logUploadInterval = if (BuildConfig.DEBUG) 1 else 30,
+            templateSyncInterval = if (BuildConfig.DEBUG) 1 else 60,
+            storageCleanInterval = if (BuildConfig.DEBUG) 1 else 360
         )
 
         Log.i(TAG, "同步协调器已启动")
@@ -199,7 +201,19 @@ internal class MonitorSyncCoordinator(
             currentWebDavClient = null
             client
         }
-        clientToClose?.close()
+
+        val closed = HashSet<WebDavClient>()
+        clientToClose?.let {
+            if (closed.add(it)) {
+                it.close()
+            }
+        }
+        clientPool.values.forEach {
+            if (closed.add(it)) {
+                it.close()
+            }
+        }
+        clientPool.clear()
 
         Log.i(TAG, "同步协调器已停止")
     }
@@ -211,6 +225,7 @@ internal class MonitorSyncCoordinator(
                 .collect { config ->
                     storageRepository.updateConfig(config)
                     templateRepository.updateConfig(config)
+                    pruneClientPool(config.webdavServers)
 
                     try {
                         onRootDirChanged?.invoke(storageRepository.getRootDirPath())
@@ -288,7 +303,8 @@ internal class MonitorSyncCoordinator(
                 currentWebDavClient = client
                 old
             }
-            oldClient?.close()
+            // 不立即关闭旧客户端，避免正在上传/下载时被中断。
+            // 旧客户端将由连接池裁剪或 stop() 时统一关闭。
 
             configRepositoryImpl.setWebDavClient(client)
             templateRepositoryImpl.setWebDavClient(client, server.templateDir)
@@ -361,9 +377,8 @@ internal class MonitorSyncCoordinator(
             for (server in config.webdavServers) {
                 if (server.url.isEmpty()) continue
 
-                var client: WebDavClient? = null
                 try {
-                    client = configRepositoryImpl.createWebDavClient(server)
+                    val client = getOrCreateClient(server)
 
                     Log.d(TAG, "正在测试降级服务器: ${server.url}")
                     if (client.testConnection()) {
@@ -373,11 +388,9 @@ internal class MonitorSyncCoordinator(
                         return@withContext true
                     } else {
                         Log.w(TAG, "降级服务器 ${server.url} 不可用")
-                        client.close()
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "测试降级服务器失败 ${server.url}: ${e.message}")
-                    client?.close()
                 }
             }
 
@@ -416,9 +429,8 @@ internal class MonitorSyncCoordinator(
             for (server in config.webdavServers) {
                 if (server.url.isEmpty()) continue
 
-                var client: WebDavClient? = null
                 try {
-                    client = configRepositoryImpl.createWebDavClient(server)
+                    val client = getOrCreateClient(server)
 
                     val startTime = System.currentTimeMillis()
                     val isAvailable = client.testConnection()
@@ -427,9 +439,7 @@ internal class MonitorSyncCoordinator(
                     if (isAvailable && responseTime < fastestResponseTime) {
                         fastestResponseTime = responseTime
                         fastestServer = server
-                        fastestClient?.close()
                         fastestClient = client
-                        client = null
                         Log.d(TAG, "发现更快的服务器: ${server.url} (${responseTime}ms)")
                     } else {
                         Log.d(
@@ -439,8 +449,6 @@ internal class MonitorSyncCoordinator(
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "测试服务器失败 ${server.url}: ${e.message}")
-                } finally {
-                    client?.close()
                 }
             }
 
@@ -455,6 +463,35 @@ internal class MonitorSyncCoordinator(
             }
         } catch (e: Exception) {
             Log.e(TAG, "reconfigureWebDavForNetwork失败: ${e.message}", e)
+        }
+    }
+
+    private fun serverKey(server: WebDavServer): String {
+        return "${server.url}|${server.username}|${server.monitorDir}|${server.remoteUploadDir}|${server.templateDir}"
+    }
+
+    private fun getOrCreateClient(server: WebDavServer): WebDavClient {
+        val key = serverKey(server)
+        return clientPool[key] ?: synchronized(clientPool) {
+            clientPool[key] ?: configRepositoryImpl.createWebDavClient(server).also {
+                clientPool[key] = it
+            }
+        }
+    }
+
+    private fun pruneClientPool(servers: List<WebDavServer>) {
+        val valid = servers.map { serverKey(it) }.toSet()
+        val activeClient = synchronized(webDavClientLock) { currentWebDavClient }
+
+        clientPool.entries.removeIf { entry ->
+            val shouldRemove = entry.key !in valid && entry.value !== activeClient
+            if (shouldRemove) {
+                try {
+                    entry.value.close()
+                } catch (_: Exception) {
+                }
+            }
+            shouldRemove
         }
     }
 }
