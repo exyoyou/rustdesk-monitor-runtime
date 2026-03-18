@@ -22,10 +22,13 @@ internal class LocationTrackManager(
         private const val TAG = "LocationTrackManager"
         private const val STAY_RADIUS_METERS = 200.0
         private const val STAY_MIN_DURATION_MS = 10 * 60 * 1000L
+        private const val STAY_MAX_GAP_MS = 10 * 60 * 1000L
+        private const val MAX_REASONABLE_SPEED_MPS = 55.0
         private val DAY_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
     }
 
     private val zoneId: ZoneId = ZoneId.systemDefault()
+    private val pointWriteLock = Any()
     @Volatile
     private var lastSavedPoint: TrackPoint? = null
 
@@ -35,6 +38,8 @@ internal class LocationTrackManager(
     private var rawDedupMinDistanceMeters: Double = 8.0
     @Volatile
     private var rawDedupMinIntervalMs: Long = 15_000L
+    @Volatile
+    private var maxAcceptAccuracyMeters: Float = 120f
 
     data class TrackPoint(
         val timestampMs: Long,
@@ -48,6 +53,7 @@ internal class LocationTrackManager(
         rawRetentionDays = config.rawRetentionDays.coerceAtLeast(1).toLong()
         rawDedupMinDistanceMeters = config.rawDedupMinDistanceMeters.coerceAtLeast(0.0)
         rawDedupMinIntervalMs = config.rawDedupMinIntervalMs.coerceAtLeast(0L)
+        maxAcceptAccuracyMeters = config.maxAcceptAccuracyMeters.coerceAtLeast(0f)
     }
 
     fun recordPoint(
@@ -65,23 +71,30 @@ internal class LocationTrackManager(
                 accuracyMeters = accuracyMeters,
                 poiName = poiName
             )
-            if (shouldSkipRawPoint(current)) {
+
+            if (!isValidPoint(current)) {
                 return
             }
 
-            val file = getRawFile(timestampMs)
-            file.parentFile?.mkdirs()
+            synchronized(pointWriteLock) {
+                if (shouldSkipRawPoint(current)) {
+                    return
+                }
 
-            val obj = JSONObject().apply {
-                put("timestampMs", timestampMs)
-                put("latitude", latitude)
-                put("longitude", longitude)
-                if (accuracyMeters != null) put("accuracyMeters", accuracyMeters)
-                if (!poiName.isNullOrBlank()) put("poiName", poiName)
+                val file = getRawFile(timestampMs)
+                file.parentFile?.mkdirs()
+
+                val obj = JSONObject().apply {
+                    put("timestampMs", timestampMs)
+                    put("latitude", latitude)
+                    put("longitude", longitude)
+                    if (accuracyMeters != null) put("accuracyMeters", accuracyMeters)
+                    if (!poiName.isNullOrBlank()) put("poiName", poiName)
+                }
+
+                file.appendText(obj.toString() + "\n")
+                lastSavedPoint = current
             }
-
-            file.appendText(obj.toString() + "\n")
-            lastSavedPoint = current
         } catch (e: Exception) {
             Log.w(TAG, "记录轨迹点失败: ${e.message}")
         }
@@ -183,6 +196,9 @@ internal class LocationTrackManager(
             var count = 1
 
             while (j < points.size) {
+                val gap = points[j].timestampMs - points[j - 1].timestampMs
+                if (gap < 0 || gap > STAY_MAX_GAP_MS) break
+
                 val centerLat = latSum / count
                 val centerLng = lngSum / count
                 val distance = haversineMeters(
@@ -231,12 +247,27 @@ internal class LocationTrackManager(
         if (points.size < 2) return 0.0
         var total = 0.0
         for (i in 1 until points.size) {
-            total += haversineMeters(
-                points[i - 1].latitude,
-                points[i - 1].longitude,
-                points[i].latitude,
-                points[i].longitude
+            val prev = points[i - 1]
+            val curr = points[i]
+
+            if (!isValidPoint(prev) || !isValidPoint(curr)) continue
+
+            val dtMs = curr.timestampMs - prev.timestampMs
+            if (dtMs <= 0L) continue
+
+            if ((prev.accuracyMeters ?: 0f) > maxAcceptAccuracyMeters) continue
+            if ((curr.accuracyMeters ?: 0f) > maxAcceptAccuracyMeters) continue
+
+            val distance = haversineMeters(
+                prev.latitude,
+                prev.longitude,
+                curr.latitude,
+                curr.longitude
             )
+            val speedMps = distance / (dtMs / 1000.0)
+            if (speedMps > MAX_REASONABLE_SPEED_MPS) continue
+
+            total += distance
         }
         return total
     }
@@ -244,16 +275,36 @@ internal class LocationTrackManager(
     private fun parsePoint(line: String): TrackPoint? {
         return try {
             val obj = JSONObject(line)
-            TrackPoint(
+            if (!obj.has("timestampMs") || !obj.has("latitude") || !obj.has("longitude")) {
+                return null
+            }
+            val point = TrackPoint(
                 timestampMs = obj.optLong("timestampMs", 0L),
                 latitude = obj.optDouble("latitude", 0.0),
                 longitude = obj.optDouble("longitude", 0.0),
                 accuracyMeters = if (obj.has("accuracyMeters")) obj.optDouble("accuracyMeters").toFloat() else null,
                 poiName = obj.optString("poiName", "").ifBlank { null }
             )
+            if (isValidPoint(point)) point else null
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun isValidPoint(point: TrackPoint): Boolean {
+        if (point.timestampMs <= 0L) return false
+        if (!isValidLatitude(point.latitude) || !isValidLongitude(point.longitude)) return false
+        val acc = point.accuracyMeters
+        if (acc != null && (acc.isNaN() || acc < 0f)) return false
+        return true
+    }
+
+    private fun isValidLatitude(value: Double): Boolean {
+        return value.isFinite() && value in -90.0..90.0
+    }
+
+    private fun isValidLongitude(value: Double): Boolean {
+        return value.isFinite() && value in -180.0..180.0
     }
 
     private fun getRawFile(timestampMs: Long): File {

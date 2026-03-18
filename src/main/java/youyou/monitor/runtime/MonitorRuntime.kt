@@ -214,15 +214,19 @@ object MonitorRuntime {
     }
 
     fun startAmapTrack(
-        intervalMs: Long = 10_000L,
+        intervalMs: Long = 60_000L,
         needAddress: Boolean = true,
-        onceLocation: Boolean = false
+        onceLocation: Boolean = true,
+        singleShotPolling: Boolean = true,
+        idleOnly: Boolean = true
     ) {
         startAmapTrackInternal(
             AMapTrackOptions(
                 intervalMs = intervalMs,
                 needAddress = needAddress,
-                onceLocation = onceLocation
+                onceLocation = onceLocation || singleShotPolling,
+                singleShotPolling = singleShotPolling,
+                idleOnly = idleOnly
             )
         )
     }
@@ -236,9 +240,11 @@ object MonitorRuntime {
 
     private fun applyLocationTrackConfig(config: LocationTrackConfig) {
         val options = AMapTrackOptions(
-            intervalMs = config.movingIntervalMs,
+            intervalMs = config.staticIntervalMs,
             needAddress = config.needAddress,
-            onceLocation = false,
+            onceLocation = config.singleShotPolling,
+            singleShotPolling = config.singleShotPolling,
+            idleOnly = config.idleOnly,
             adaptiveInterval = config.adaptiveInterval,
             movingIntervalMs = config.movingIntervalMs,
             staticIntervalMs = config.staticIntervalMs,
