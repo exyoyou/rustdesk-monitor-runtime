@@ -20,8 +20,6 @@ internal class LocationTrackManager(
 ) {
     companion object {
         private const val TAG = "LocationTrackManager"
-        private const val STAY_RADIUS_METERS = 200.0
-        private const val STAY_MIN_DURATION_MS = 10 * 60 * 1000L
         private const val STAY_MAX_GAP_MS = 10 * 60 * 1000L
         private const val MAX_REASONABLE_SPEED_MPS = 55.0
         private val DAY_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
@@ -40,6 +38,10 @@ internal class LocationTrackManager(
     private var rawDedupMinIntervalMs: Long = 15_000L
     @Volatile
     private var maxAcceptAccuracyMeters: Float = 120f
+    @Volatile
+    private var stayRadiusMeters: Double = 50.0
+    @Volatile
+    private var stayMinDurationMs: Long = 5 * 60 * 1000L
 
     data class TrackPoint(
         val timestampMs: Long,
@@ -54,6 +56,8 @@ internal class LocationTrackManager(
         rawDedupMinDistanceMeters = config.rawDedupMinDistanceMeters.coerceAtLeast(0.0)
         rawDedupMinIntervalMs = config.rawDedupMinIntervalMs.coerceAtLeast(0L)
         maxAcceptAccuracyMeters = config.maxAcceptAccuracyMeters.coerceAtLeast(0f)
+        stayRadiusMeters = config.stayRadiusMeters.coerceAtLeast(1.0)
+        stayMinDurationMs = config.stayMinDurationMs.coerceAtLeast(1000L)
     }
 
     fun recordPoint(
@@ -208,7 +212,7 @@ internal class LocationTrackManager(
                     points[j].longitude
                 )
 
-                if (distance > STAY_RADIUS_METERS) break
+                if (distance > stayRadiusMeters) break
 
                 latSum += points[j].latitude
                 lngSum += points[j].longitude
@@ -220,7 +224,7 @@ internal class LocationTrackManager(
             val end = points[j - 1]
             val duration = end.timestampMs - start.timestampMs
 
-            if (duration >= STAY_MIN_DURATION_MS) {
+            if (duration >= stayMinDurationMs) {
                 val poiName = points.subList(i, j)
                     .mapNotNull { it.poiName?.takeIf { p -> p.isNotBlank() } }
                     .firstOrNull()
