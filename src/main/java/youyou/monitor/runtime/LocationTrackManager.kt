@@ -119,13 +119,44 @@ internal class LocationTrackManager(
             if (points.isEmpty()) return null
 
             val stays = analyzeStay(points)
+            val routePoints = buildRoutePoints(points)
+            val movingSegments = analyzeMovingSegments(routePoints)
             val totalDistance = calculateDistanceMeters(points)
 
             val reportObj = JSONObject().apply {
                 put("day", reportDay)
                 put("generatedAt", Instant.now().toString())
                 put("totalPoints", points.size)
+                put("routePointCount", routePoints.size)
+                put("movingSegmentCount", movingSegments.size)
                 put("totalDistanceMeters", totalDistance)
+
+                val routeArray = JSONArray()
+                routePoints.forEach { point ->
+                    routeArray.put(trackPointToJson(point))
+                }
+                put("routePoints", routeArray)
+                put("trackPoints", JSONArray(routeArray.toString()))
+                put("points", JSONArray(routeArray.toString()))
+                put("locations", JSONArray(routeArray.toString()))
+
+                val segmentArray = JSONArray()
+                movingSegments.forEach { segment ->
+                    val pointArray = JSONArray()
+                    segment.points.forEach { point ->
+                        pointArray.put(trackPointToJson(point))
+                    }
+                    segmentArray.put(
+                        JSONObject().apply {
+                            put("startTime", Instant.ofEpochMilli(segment.startTs).toString())
+                            put("endTime", Instant.ofEpochMilli(segment.endTs).toString())
+                            put("distanceMeters", segment.distanceMeters)
+                            put("pointCount", segment.points.size)
+                            put("points", pointArray)
+                        }
+                    )
+                }
+                put("movingSegments", segmentArray)
 
                 val stayArray = JSONArray()
                 stays.forEach { stay ->
@@ -188,6 +219,13 @@ internal class LocationTrackManager(
         val poiName: String?
     )
 
+    private data class MovingSegment(
+        val startTs: Long,
+        val endTs: Long,
+        val distanceMeters: Double,
+        val points: List<TrackPoint>
+    )
+
     private fun analyzeStay(points: List<TrackPoint>): List<StaySegment> {
         if (points.size < 2) return emptyList()
         val stays = mutableListOf<StaySegment>()
@@ -245,6 +283,106 @@ internal class LocationTrackManager(
         }
 
         return stays
+    }
+
+    private fun buildRoutePoints(points: List<TrackPoint>): List<TrackPoint> {
+        if (points.isEmpty()) return emptyList()
+
+        val routePoints = mutableListOf<TrackPoint>()
+        var prevAccepted: TrackPoint? = null
+
+        points.forEach { point ->
+            if (!isValidPoint(point)) return@forEach
+            if ((point.accuracyMeters ?: 0f) > maxAcceptAccuracyMeters) return@forEach
+
+            val prev = prevAccepted
+            if (prev != null) {
+                val dtMs = point.timestampMs - prev.timestampMs
+                if (dtMs <= 0L) return@forEach
+
+                val distance = haversineMeters(
+                    prev.latitude,
+                    prev.longitude,
+                    point.latitude,
+                    point.longitude
+                )
+                val speedMps = distance / (dtMs / 1000.0)
+                if (speedMps > MAX_REASONABLE_SPEED_MPS) return@forEach
+            }
+
+            routePoints.add(point)
+            prevAccepted = point
+        }
+
+        return routePoints
+    }
+
+    private fun analyzeMovingSegments(points: List<TrackPoint>): List<MovingSegment> {
+        if (points.size < 2) return emptyList()
+
+        val segments = mutableListOf<MovingSegment>()
+        val currentPoints = mutableListOf<TrackPoint>()
+        val movementThresholdMeters = maxOf(rawDedupMinDistanceMeters, 15.0)
+
+        fun flushSegment() {
+            if (currentPoints.size < 2) {
+                currentPoints.clear()
+                return
+            }
+            segments.add(
+                MovingSegment(
+                    startTs = currentPoints.first().timestampMs,
+                    endTs = currentPoints.last().timestampMs,
+                    distanceMeters = calculateDistanceMeters(currentPoints),
+                    points = currentPoints.toList()
+                )
+            )
+            currentPoints.clear()
+        }
+
+        for (i in 1 until points.size) {
+            val prev = points[i - 1]
+            val curr = points[i]
+            val dtMs = curr.timestampMs - prev.timestampMs
+            if (dtMs <= 0L || dtMs > STAY_MAX_GAP_MS) {
+                flushSegment()
+                continue
+            }
+
+            val distance = haversineMeters(
+                prev.latitude,
+                prev.longitude,
+                curr.latitude,
+                curr.longitude
+            )
+            val speedMps = distance / (dtMs / 1000.0)
+            val isMoving = distance >= movementThresholdMeters || speedMps >= 1.0
+
+            if (isMoving) {
+                if (currentPoints.isEmpty()) {
+                    currentPoints.add(prev)
+                }
+                if (currentPoints.last().timestampMs != curr.timestampMs) {
+                    currentPoints.add(curr)
+                }
+            } else {
+                flushSegment()
+            }
+        }
+
+        flushSegment()
+        return segments
+    }
+
+    private fun trackPointToJson(point: TrackPoint): JSONObject {
+        return JSONObject().apply {
+            put("time", Instant.ofEpochMilli(point.timestampMs).toString())
+            put("timestampMs", point.timestampMs)
+            put("latitude", point.latitude)
+            put("longitude", point.longitude)
+            if (point.accuracyMeters != null) put("accuracyMeters", point.accuracyMeters)
+            if (!point.poiName.isNullOrBlank()) put("poiName", point.poiName)
+        }
     }
 
     private fun calculateDistanceMeters(points: List<TrackPoint>): Double {
