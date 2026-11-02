@@ -6,9 +6,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import org.koin.core.context.GlobalContext
@@ -23,6 +25,7 @@ import youyou.monitor.screen.infra.repository.TemplateRepositoryImpl
 import youyou.monitor.sync.config.ConfigRepositoryImpl
 import youyou.monitor.sync.storage.StorageRepository
 import youyou.monitor.sync.task.ScheduledTaskManager
+import java.io.File
 
 object MonitorRuntime {
     private const val TAG = "MonitorRuntime"
@@ -49,6 +52,7 @@ object MonitorRuntime {
     private var pendingRootDirChanged: ((String) -> Unit)? = null
 
     fun init(context: Context, deviceIdProvider: (() -> String)? = null) {
+        startFdMonitor()
         synchronized(lock) {
             if (deviceIdProvider != null) {
                 pendingDeviceIdProvider = deviceIdProvider
@@ -172,8 +176,8 @@ object MonitorRuntime {
         return GlobalContext.get().get<StorageRepository>().getRootDirPath()
     }
 
-    fun onFrameAvailable(buffer: ByteBuffer, width: Int, height: Int, scale: Int = 1) {
-        monitorService?.onFrameAvailable(buffer, width, height, scale)
+    fun onFrameAvailable(buffer: ByteBuffer, width: Int, height: Int, scale: Int = 1, rowStride: Int = width * 4) {
+        monitorService?.onFrameAvailable(buffer, width, height, scale, rowStride)
     }
 
     fun recordTrackPoint(
@@ -307,5 +311,39 @@ object MonitorRuntime {
 
     private fun ensureInitializedLocked() {
         check(initialized) { "MonitorRuntime not initialized, call init(context) first." }
+    }
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private fun startFdMonitor() {
+        applicationScope.launch {
+            while (isActive) {
+                try {
+                    val fdFile = File("/proc/self/fd")
+                    val fds = fdFile.listFiles()
+                    val fdCount = fds?.size ?: 0
+
+                    Log.d(
+                        "DEBUG_FD",
+                        "Current PID: ${android.os.Process.myPid()} | Global FD count: $fdCount"
+                    )
+
+                    // 如果 FD 数量异常，打印前 5 个 FD 具体是什么情况
+                    if (fdCount > 800) {
+                        Log.e("DEBUG_FD", "WARNING: High FD usage!")
+                        fds?.take(5)?.forEach {
+                            try {
+                                val path = android.system.Os.readlink(it.absolutePath)
+                                Log.e("DEBUG_FD", "FD ${it.name} -> $path")
+                            } catch (e: Exception) {
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("DEBUG_FD", "Monitor error: ${e.message}")
+                }
+
+                // 每隔 1000 毫秒执行一次
+                delay(1000)
+            }
+        }
     }
 }
