@@ -38,6 +38,10 @@ object MonitorRuntime {
     @Volatile
     private var started = false
 
+    // 常驻配置同步：没有录屏时也要定时检查远程配置，才能在开关打开时去开启录屏
+    private var configSyncResident = false
+    private var recordEnabledJob: Job? = null
+
     private var appContext: Context? = null
     private var monitorService: MonitorService? = null
     private var syncCoordinator: MonitorSyncCoordinator? = null
@@ -133,7 +137,9 @@ object MonitorRuntime {
             if (!initialized || !started) return
 
             try {
-                syncCoordinator?.stop()
+                if (!configSyncResident) {
+                    syncCoordinator?.stop()
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Stop sync coordinator failed: ${e.message}")
             }
@@ -153,6 +159,38 @@ object MonitorRuntime {
             isAmapTrackStarted = false
 
             started = false
+        }
+    }
+
+    /**
+     * 只启动配置/文件同步并监听总开关（recordEnabled），不处理画面；录屏之外也能收到远程配置变化。
+     * 回调在后台线程触发，注册后会立刻回调一次当前值。
+     */
+    fun startConfigSync(onRecordEnabledChanged: (Boolean) -> Unit) {
+        synchronized(lock) {
+            ensureInitializedLocked()
+            configSyncResident = true
+            syncCoordinator?.start()
+            recordEnabledJob?.cancel()
+            val configRepository = GlobalContext.get().get<ConfigRepository>()
+            recordEnabledJob = locationConfigScope?.launch {
+                configRepository.getConfigFlow()
+                    .map { it.recordEnabled }
+                    .distinctUntilChanged()
+                    .collect { onRecordEnabledChanged(it) }
+            }
+        }
+    }
+
+    fun stopConfigSync() {
+        synchronized(lock) {
+            configSyncResident = false
+            recordEnabledJob?.cancel()
+            recordEnabledJob = null
+            // 正在录屏时同步仍由 start()/stop() 管理，这里不动
+            if (initialized && !started) {
+                syncCoordinator?.stop()
+            }
         }
     }
 
