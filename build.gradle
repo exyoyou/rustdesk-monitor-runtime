@@ -56,7 +56,8 @@ dependencies {
     implementation project(':monitor-webdav')
     implementation project(':monitor-logger')
     implementation project(':monitor-amap')
-
+    // 宿主 app 只依赖 monitor-runtime，用 api 传递给它，避免改上游的 app/build.gradle
+    api project(':monitor-proxy')
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation "org.jetbrains.kotlin:kotlin-stdlib:2.1.21"
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
