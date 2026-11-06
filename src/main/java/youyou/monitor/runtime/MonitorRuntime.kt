@@ -150,14 +150,6 @@ object MonitorRuntime {
                 Log.w(TAG, "Stop monitor service failed: ${e.message}")
             }
 
-            try {
-                amapTrackCollector?.stop()
-            } catch (e: Exception) {
-                Log.w(TAG, "Stop amap collector failed: ${e.message}")
-            }
-
-            isAmapTrackStarted = false
-
             started = false
         }
     }
@@ -306,6 +298,20 @@ object MonitorRuntime {
         val shouldRestart = changeLog.first
         val oldOptions = changeLog.second
         val wasStarted = changeLog.third
+
+        if (!config.enabled) {
+            if (wasStarted) {
+                stopAmapTrack()
+                Log.i(TAG, "Location track disabled by config, collector stopped")
+            }
+            return
+        }
+
+        if (!wasStarted) {
+            startAmapTrackInternal(options)
+            Log.i(TAG, "Location track collector started by config: $options")
+            return
+        }
 
         if (oldOptions != options) {
             Log.i(
