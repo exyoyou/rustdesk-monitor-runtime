@@ -55,9 +55,6 @@ object MonitorRuntime {
     private var pendingRootDirChanged: ((String) -> Unit)? = null
 
     fun init(context: Context, deviceIdProvider: (() -> String)? = null) {
-        if (BuildConfig.DEBUG) {
-            startFdMonitor()
-        }
         synchronized(lock) {
             if (deviceIdProvider != null) {
                 pendingDeviceIdProvider = deviceIdProvider
@@ -65,6 +62,9 @@ object MonitorRuntime {
             if (initialized) {
                 configureDeviceIdProviderLocked(pendingDeviceIdProvider)
                 return
+            }
+            if (BuildConfig.DEBUG) {
+                startFdMonitor()
             }
 
             val applicationContext = context.applicationContext
