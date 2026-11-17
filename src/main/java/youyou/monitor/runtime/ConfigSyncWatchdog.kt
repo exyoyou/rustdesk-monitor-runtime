@@ -1,5 +1,6 @@
 package youyou.monitor.runtime
 
+import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +21,8 @@ import youyou.monitor.sync.config.ConfigRepositoryImpl
  *  - 单次拉取有整体超时 [SYNC_TIMEOUT_MS]，阻塞的网络调用不会卡住看门狗；
  *  - 循环吞掉一切异常，不会自己退出；外部（WorkManager）通过 [ensureRunning] 检查心跳，循环不在或心跳过期就重建。
  * 上次成功时间取自 [ConfigRepositoryImpl.lastSyncSuccessAt]，其他路径（启动加载、定时任务）拉取成功也会计入。
+ * 时间判断都用单调时钟：新鲜度和重试用 elapsedRealtime（含休眠，改系统时间不影响）；
+ * 心跳用 uptimeMillis（休眠时不走），设备深度休眠导致 delay 变长不会被误判为循环卡死。
  */
 internal class ConfigSyncWatchdog(
     private val configRepository: ConfigRepositoryImpl,
@@ -28,6 +31,8 @@ internal class ConfigSyncWatchdog(
     companion object {
         private const val TAG = "ConfigSyncWatchdog"
         private const val TICK_MS = 60_000L
+        // 进程启动时常驻层自己会先拉一次，首轮稍等，避免重复拉取
+        private const val STARTUP_DELAY_MS = 30_000L
         private const val FIRST_RETRY_MS = 60_000L
         private const val MAX_RETRY_MS = 15 * 60_000L
         private const val SYNC_TIMEOUT_MS = 5 * 60_000L
@@ -52,7 +57,7 @@ internal class ConfigSyncWatchdog(
     fun ensureRunning(): Boolean {
         synchronized(lock) {
             val job = loopJob
-            val now = System.currentTimeMillis()
+            val now = SystemClock.uptimeMillis()
             if (job != null && job.isActive && now - heartbeatAt < STALE_HEARTBEAT_MS) {
                 return false
             }
@@ -68,17 +73,17 @@ internal class ConfigSyncWatchdog(
 
     /** 立即检查一次：数据过期（或从未成功）就马上拉，返回当前是否健康 */
     suspend fun checkNow(): Boolean {
-        val now = System.currentTimeMillis()
-        if (isFresh(now)) return true
+        if (isFresh(SystemClock.elapsedRealtime())) return true
         return syncOnce()
     }
 
     private suspend fun loop() {
         Log.i(TAG, "看门狗已启动，刷新间隔 ${refreshIntervalMs / 1000}s")
+        delay(STARTUP_DELAY_MS)
         while (scope.isActive) {
-            heartbeatAt = System.currentTimeMillis()
+            heartbeatAt = SystemClock.uptimeMillis()
             try {
-                val now = System.currentTimeMillis()
+                val now = SystemClock.elapsedRealtime()
                 if (!isFresh(now) && now >= nextRetryAt) {
                     syncOnce()
                 }
@@ -102,7 +107,7 @@ internal class ConfigSyncWatchdog(
         if (result == null) {
             attempt.cancel()
         }
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         if (result != null && result.isSuccess) {
             if (consecutiveFailures > 0) {
                 Log.i(TAG, "配置拉取已恢复（之前连续失败 $consecutiveFailures 次）")
