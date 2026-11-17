@@ -109,7 +109,7 @@ object MonitorRuntime {
 
             configSyncWatchdog = ConfigSyncWatchdog(
                 configRepositoryImpl,
-                refreshIntervalMs = if (BuildConfig.DEBUG) 60_000L else 15 * 60_000L
+                defaultRefreshIntervalMs = if (BuildConfig.DEBUG) 60_000L else 15 * 60_000L
             )
 
             initialized = true

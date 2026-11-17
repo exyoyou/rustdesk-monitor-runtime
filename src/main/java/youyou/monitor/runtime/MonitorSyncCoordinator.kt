@@ -49,11 +49,6 @@ internal class MonitorSyncCoordinator(
     @Volatile
     private var isRunning = false
 
-    private val configRetryLock = Any()
-    private var configRetryAttempt = 0
-    private val configRetryInitialMs = if (BuildConfig.DEBUG) 30_000L else 60_000L
-    private val configRetryMaxMs = 6 * 60 * 60 * 1000L
-
     @Volatile
     private var currentWebDavClient: WebDavClient? = null
     private val webDavClientLock = Any()
@@ -158,17 +153,13 @@ internal class MonitorSyncCoordinator(
 
         getScope().launch(Dispatchers.IO) {
             try {
-                val success = autoLoadConfiguration()
-                if (!success && isRunning) {
-                    scheduleRetryConfig()
-                }
+                autoLoadConfiguration()
             } catch (e: Exception) {
                 Log.e(TAG, "启动自动加载配置失败: ${e.message}", e)
             }
         }
 
         scheduledTaskManager.startAllTasks(
-            configUpdateInterval = if (BuildConfig.DEBUG) 1 else 6 * 60,
             imageUploadInterval = if (BuildConfig.DEBUG) 1 else 5,
             videoUploadInterval = if (BuildConfig.DEBUG) 1 else 10,
             logUploadInterval = if (BuildConfig.DEBUG) 1 else 30,
@@ -318,40 +309,8 @@ internal class MonitorSyncCoordinator(
             }
 
             Log.i(TAG, "WebDAV已配置最快服务器")
-            synchronized(configRetryLock) { configRetryAttempt = 0 }
         } catch (e: Exception) {
             Log.e(TAG, "配置WebDAV失败: ${e.message}", e)
-        }
-    }
-
-    private fun scheduleRetryConfig() {
-        synchronized(configRetryLock) {
-            if (!isRunning) return
-
-            val attempt = configRetryAttempt
-            val calc = try {
-                configRetryInitialMs * (1L shl attempt)
-            } catch (_: Exception) {
-                configRetryMaxMs
-            }
-            val delayMs = kotlin.math.min(calc, configRetryMaxMs)
-            configRetryAttempt = attempt + 1
-
-            Log.i(TAG, "配置加载失败，计划在 ${delayMs / 1000}s 后重试 (attempt=${configRetryAttempt})")
-
-            getScope().launch(Dispatchers.IO) {
-                try {
-                    kotlinx.coroutines.delay(delayMs)
-                    if (!isRunning) return@launch
-
-                    val success = autoLoadConfiguration()
-                    if (!success && isRunning) {
-                        scheduleRetryConfig()
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "配置重试任务失败: ${e.message}")
-                }
-            }
         }
     }
 
@@ -362,7 +321,6 @@ internal class MonitorSyncCoordinator(
             val syncResult = configRepository.syncFromRemote()
             if (syncResult.isSuccess) {
                 Log.i(TAG, "远程配置已同步，WebDAV通过回调自动配置")
-                synchronized(configRetryLock) { configRetryAttempt = 0 }
                 return@withContext true
             }
 
@@ -384,7 +342,6 @@ internal class MonitorSyncCoordinator(
                     if (client.testConnection()) {
                         Log.i(TAG, "正在配置降级服务器: ${server.url}")
                         configureWebDavDirect(server, client)
-                        synchronized(configRetryLock) { configRetryAttempt = 0 }
                         return@withContext true
                     } else {
                         Log.w(TAG, "降级服务器 ${server.url} 不可用")

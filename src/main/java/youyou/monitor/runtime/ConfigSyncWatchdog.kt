@@ -16,17 +16,17 @@ import youyou.monitor.sync.config.ConfigRepositoryImpl
 
 /**
  * 配置拉取看门狗：配置拉取是最重要的链路，不依赖定时任务"到点去拉"，而是持续检查它是否健康，不健康就立刻恢复。
- *  - 每 [TICK_MS] 检查一次：距上次成功超过 [refreshIntervalMs] 就拉；失败按 1、2、4… 分钟退避重试，最长 [MAX_RETRY_MS]；
+ *  - 每 [TICK_MS] 检查一次：距上次成功超过刷新间隔就拉（配置的 configSyncIntervalMinutes，未配置用 [defaultRefreshIntervalMs]）；失败按 1、2、4… 分钟退避重试，最长 [MAX_RETRY_MS]；
  *  - 拉取不依赖 WebDAV 客户端是否已配置（直接按本地配置里的服务器测速下载），成功后会通过回调配置好客户端；
  *  - 单次拉取有整体超时 [SYNC_TIMEOUT_MS]，阻塞的网络调用不会卡住看门狗；
  *  - 循环吞掉一切异常，不会自己退出；外部（WorkManager）通过 [ensureRunning] 检查心跳，循环不在或心跳过期就重建。
- * 上次成功时间取自 [ConfigRepositoryImpl.lastSyncSuccessAt]，其他路径（启动加载、定时任务）拉取成功也会计入。
+ * 上次成功时间取自 [ConfigRepositoryImpl.lastSyncSuccessAt]，启动时的加载拉取成功也会计入。
  * 时间判断都用单调时钟：新鲜度和重试用 elapsedRealtime（含休眠，改系统时间不影响）；
  * 心跳用 uptimeMillis（休眠时不走），设备深度休眠导致 delay 变长不会被误判为循环卡死。
  */
 internal class ConfigSyncWatchdog(
     private val configRepository: ConfigRepositoryImpl,
-    private val refreshIntervalMs: Long
+    private val defaultRefreshIntervalMs: Long
 ) {
     companion object {
         private const val TAG = "ConfigSyncWatchdog"
@@ -35,6 +35,8 @@ internal class ConfigSyncWatchdog(
         private const val STARTUP_DELAY_MS = 30_000L
         private const val FIRST_RETRY_MS = 60_000L
         private const val MAX_RETRY_MS = 15 * 60_000L
+        // 配置的间隔上限：配错成很大的值时，设备也至少每天拉一次，还能用新配置改回来
+        private const val MAX_REFRESH_MINUTES = 24 * 60
         private const val SYNC_TIMEOUT_MS = 5 * 60_000L
         // 一轮最长 = 拉取超时 + 一个 tick，超过两轮没有心跳就认为循环卡死
         private const val STALE_HEARTBEAT_MS = 2 * (SYNC_TIMEOUT_MS + TICK_MS)
@@ -78,7 +80,7 @@ internal class ConfigSyncWatchdog(
     }
 
     private suspend fun loop() {
-        Log.i(TAG, "看门狗已启动，刷新间隔 ${refreshIntervalMs / 1000}s")
+        Log.i(TAG, "看门狗已启动，当前刷新间隔 ${refreshIntervalMs() / 1000}s")
         delay(STARTUP_DELAY_MS)
         while (scope.isActive) {
             heartbeatAt = SystemClock.uptimeMillis()
@@ -96,9 +98,15 @@ internal class ConfigSyncWatchdog(
         }
     }
 
-    private fun isFresh(now: Long): Boolean {
+    private suspend fun isFresh(now: Long): Boolean {
         val last = configRepository.lastSyncSuccessAt
-        return last > 0L && now - last < refreshIntervalMs
+        return last > 0L && now - last < refreshIntervalMs()
+    }
+
+    private suspend fun refreshIntervalMs(): Long {
+        val minutes = configRepository.getCurrentConfig().configSyncIntervalMinutes
+        if (minutes <= 0) return defaultRefreshIntervalMs
+        return minutes.coerceAtMost(MAX_REFRESH_MINUTES) * 60_000L
     }
 
     private suspend fun syncOnce(): Boolean {
