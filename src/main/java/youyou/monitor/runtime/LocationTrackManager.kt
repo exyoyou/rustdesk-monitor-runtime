@@ -206,8 +206,10 @@ internal class LocationTrackManager(
 
     fun onReportUploaded(reportFile: File) {
         try {
+            // 报告在当天结束之后生成的才是完整版；按生成时间而不是上传完成时间判断，跨午夜上传的当天报告不算定稿
             val day = reportFile.name.removeSuffix("-report.json")
-            if (day != LocalDate.now(zoneId).format(DAY_FMT)) {
+            val generatedDay = Instant.ofEpochMilli(reportFile.lastModified()).atZone(zoneId).toLocalDate().format(DAY_FMT)
+            if (generatedDay > day) {
                 getUploadedMarker(day).createNewFile()
             }
             if (reportFile.exists() && !reportFile.delete()) {

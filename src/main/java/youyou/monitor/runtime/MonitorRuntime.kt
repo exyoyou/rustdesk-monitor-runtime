@@ -54,6 +54,7 @@ object MonitorRuntime {
     private var amapTrackOptions: AMapTrackOptions = AMapTrackOptions()
     private var isAmapTrackStarted: Boolean = false
     private var backgroundScope: CoroutineScope? = null
+    private var configSyncWatchdog: ConfigSyncWatchdog? = null
 
     private var pendingDeviceIdProvider: (() -> String)? = null
     private var pendingRootDirChanged: ((String) -> Unit)? = null
@@ -106,7 +107,14 @@ object MonitorRuntime {
             configureDeviceIdProviderLocked(pendingDeviceIdProvider)
             syncCoordinator?.setOnRootDirChanged(pendingRootDirChanged)
 
+            configSyncWatchdog = ConfigSyncWatchdog(
+                configRepositoryImpl,
+                refreshIntervalMs = if (BuildConfig.DEBUG) 60_000L else 15 * 60_000L
+            )
+
             initialized = true
+            // 配置拉取不随录屏或常驻层回调启停，初始化完成就开始守护
+            configSyncWatchdog?.ensureRunning()
             if (BuildConfig.DEBUG) {
                 startFdMonitor()
             }
@@ -189,14 +197,19 @@ object MonitorRuntime {
         }
     }
 
-    /** 立即从远程拉一次配置（供 WorkManager 兜底任务调用），成功返回 true */
-    suspend fun syncConfigNow(): Boolean {
-        synchronized(lock) {
+    /**
+     * 检查配置拉取是否健康（供 WorkManager 兜底任务调用）：看门狗循环不在或心跳过期就重建，
+     * 配置过期或从未拉取成功就立即拉一次。返回当前是否健康。
+     */
+    suspend fun checkConfigSync(): Boolean {
+        val watchdog = synchronized(lock) {
             ensureInitializedLocked()
+            configSyncWatchdog
+        } ?: return false
+        if (watchdog.ensureRunning()) {
+            Log.w(TAG, "config sync watchdog was not running, restarted")
         }
-        val result = GlobalContext.get().get<ConfigRepository>().syncFromRemote()
-        result.onFailure { Log.w(TAG, "syncConfigNow failed: ${it.message}") }
-        return result.isSuccess
+        return watchdog.checkNow()
     }
 
     fun getRootDirPath(): String {

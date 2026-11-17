@@ -251,8 +251,8 @@ internal class MonitorSyncCoordinator(
                 existingScope
             } else {
                 val newJob = SupervisorJob()
-                val dispatcher = if (isRunning) Dispatchers.Main else Dispatchers.Default
-                val newScope = CoroutineScope(dispatcher + newJob)
+                // 配置变化处理里有磁盘读写（迁移、日志目录、prefs），不能放主线程
+                val newScope = CoroutineScope(Dispatchers.Default + newJob)
                 scope = newScope
                 scopeJob = newJob
                 newScope
