@@ -3,7 +3,6 @@ package youyou.monitor.runtime
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -26,6 +25,13 @@ import youyou.monitor.sync.storage.StorageRepository
 import youyou.monitor.sync.task.ScheduledTaskManager
 import java.io.File
 
+/**
+ * 监控模块入口，分两条互不影响的生命周期：
+ *  - 常驻层 [startBackground]：配置下载/更新、文件上传、模板下载、存储清理、定位（是否定位由配置决定）。
+ *    进程在就一直运行，不停止，不依赖 OpenCV；
+ *  - 识别层 [startScreen] / [stopScreen]：OpenCV 屏幕识别，和录屏绑定，录屏开才开。
+ * 两者都会先调用 [init]（日志、Koin、仓储等基础对象，可重复调用，失败后下次调用会重试）。
+ */
 object MonitorRuntime {
     private const val TAG = "MonitorRuntime"
 
@@ -35,11 +41,10 @@ object MonitorRuntime {
     private var initialized = false
 
     @Volatile
-    private var started = false
+    private var backgroundStarted = false
 
-    // 常驻配置同步：没有录屏时也要定时检查远程配置，才能在开关打开时去开启录屏
-    private var configSyncResident = false
-    private var recordEnabledJob: Job? = null
+    @Volatile
+    private var screenStarted = false
 
     private var appContext: Context? = null
     private var monitorService: MonitorService? = null
@@ -48,8 +53,7 @@ object MonitorRuntime {
     private var amapTrackCollector: AmapTrackCollector? = null
     private var amapTrackOptions: AMapTrackOptions = AMapTrackOptions()
     private var isAmapTrackStarted: Boolean = false
-    private var locationConfigScope: CoroutineScope? = null
-    private var locationConfigJob: Job? = null
+    private var backgroundScope: CoroutineScope? = null
 
     private var pendingDeviceIdProvider: (() -> String)? = null
     private var pendingRootDirChanged: ((String) -> Unit)? = null
@@ -63,15 +67,12 @@ object MonitorRuntime {
                 configureDeviceIdProviderLocked(pendingDeviceIdProvider)
                 return
             }
-            if (BuildConfig.DEBUG) {
-                startFdMonitor()
-            }
 
             val applicationContext = context.applicationContext
             appContext = applicationContext
 
-            MonitorService.init(applicationContext)
-            monitorService = MonitorService.getInstance()
+            // 只初始化日志和 Koin，不加载 OpenCV（OpenCV 在 startScreen 时才加载）
+            youyou.monitor.screen.di.initKoin(applicationContext)
 
             val koin = GlobalContext.get()
             val configRepository = koin.get<ConfigRepository>()
@@ -93,17 +94,7 @@ object MonitorRuntime {
 
             locationTrackManager = LocationTrackManager(storageRepository)
             amapTrackCollector = AmapTrackCollector(applicationContext)
-
-            val cfgScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-            locationConfigScope = cfgScope
-            locationConfigJob = cfgScope.launch {
-                configRepository.getConfigFlow()
-                    .map { it.locationTrack }
-                    .distinctUntilChanged()
-                    .collectLatest { cfg ->
-                        applyLocationTrackConfig(cfg)
-                    }
-            }
+            backgroundScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
             scheduledTaskManager.setTrackReportProvider {
                 locationTrackManager?.getPendingReportFiles() ?: emptyList()
@@ -116,72 +107,70 @@ object MonitorRuntime {
             syncCoordinator?.setOnRootDirChanged(pendingRootDirChanged)
 
             initialized = true
+            if (BuildConfig.DEBUG) {
+                startFdMonitor()
+            }
             Log.i(TAG, "MonitorRuntime initialized")
         }
     }
 
-    fun start() {
-        synchronized(lock) {
-            ensureInitializedLocked()
-            if (started) return
-
-            monitorService?.start()
-            syncCoordinator?.start()
-            started = true
-        }
-    }
-
-    fun stop() {
-        synchronized(lock) {
-            if (!initialized || !started) return
-
-            try {
-                if (!configSyncResident) {
-                    syncCoordinator?.stop()
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Stop sync coordinator failed: ${e.message}")
-            }
-
-            try {
-                monitorService?.stop()
-            } catch (e: Exception) {
-                Log.w(TAG, "Stop monitor service failed: ${e.message}")
-            }
-
-            started = false
-        }
-    }
-
     /**
-     * 只启动配置/文件同步并监听总开关（recordEnabled），不处理画面；录屏之外也能收到远程配置变化。
-     * 回调在后台线程触发，注册后会立刻回调一次当前值。
+     * 启动常驻层：配置同步、上传等定时任务、按配置开关定位，并监听录屏总开关（recordEnabled）。
+     * 只启动一次，之后不停止；重复调用无效果。回调在后台线程触发，注册后会立刻回调一次当前值。
      */
-    fun startConfigSync(onRecordEnabledChanged: (Boolean) -> Unit) {
+    fun startBackground(onRecordEnabledChanged: (Boolean) -> Unit) {
         synchronized(lock) {
             ensureInitializedLocked()
-            configSyncResident = true
+            if (backgroundStarted) return
+
             syncCoordinator?.start()
-            recordEnabledJob?.cancel()
+
             val configRepository = GlobalContext.get().get<ConfigRepository>()
-            recordEnabledJob = locationConfigScope?.launch {
+            val scope = backgroundScope ?: return
+            scope.launch {
+                configRepository.getConfigFlow()
+                    .map { it.locationTrack }
+                    .distinctUntilChanged()
+                    .collectLatest { cfg ->
+                        applyLocationTrackConfig(cfg)
+                    }
+            }
+            scope.launch {
                 configRepository.getConfigFlow()
                     .map { it.recordEnabled }
                     .distinctUntilChanged()
                     .collect { onRecordEnabledChanged(it) }
             }
+
+            backgroundStarted = true
+            Log.i(TAG, "background started")
         }
     }
 
-    fun stopConfigSync() {
+    /** 开启屏幕识别（随录屏）。首次调用时加载 OpenCV，失败会抛异常，下次调用重试 */
+    fun startScreen() {
         synchronized(lock) {
-            configSyncResident = false
-            recordEnabledJob?.cancel()
-            recordEnabledJob = null
-            // 正在录屏时同步仍由 start()/stop() 管理，这里不动
-            if (initialized && !started) {
-                syncCoordinator?.stop()
+            ensureInitializedLocked()
+            if (screenStarted) return
+
+            MonitorService.init(appContext!!)
+            val service = MonitorService.getInstance()
+            monitorService = service
+            service.start()
+            screenStarted = true
+        }
+    }
+
+    /** 关闭屏幕识别（随录屏），不影响常驻层 */
+    fun stopScreen() {
+        synchronized(lock) {
+            if (!screenStarted) return
+            try {
+                monitorService?.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Stop monitor service failed: ${e.message}")
             }
+            screenStarted = false
         }
     }
 
