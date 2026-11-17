@@ -1,7 +1,6 @@
 package youyou.monitor.runtime
 
 import android.content.Context
-import android.hardware.HardwareBuffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -332,12 +331,13 @@ object MonitorRuntime {
         }
     }
 
-    fun writeHardwareBufferToBuffer(
-        hardwareBuffer: HardwareBuffer,
-        dest: ByteBuffer
-    ): Int {
-        return RuntimeNativeLib.nativeWriteHardwareBufferToBuffer(hardwareBuffer, dest)
-    }
+    // 已停用：native 库 yoyo_runtime 不再编译，见 com/tools/yoyo/NativeLib.kt
+    // fun writeHardwareBufferToBuffer(
+    //     hardwareBuffer: HardwareBuffer,
+    //     dest: ByteBuffer
+    // ): Int {
+    //     return RuntimeNativeLib.nativeWriteHardwareBufferToBuffer(hardwareBuffer, dest)
+    // }
 
     fun getApplicationContext(): Context {
         synchronized(lock) {
