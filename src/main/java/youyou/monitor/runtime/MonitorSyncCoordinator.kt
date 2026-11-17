@@ -467,7 +467,7 @@ internal class MonitorSyncCoordinator(
     }
 
     private fun serverKey(server: WebDavServer): String {
-        return "${server.url}|${server.username}|${server.monitorDir}|${server.remoteUploadDir}|${server.templateDir}"
+        return "${server.url}|${server.username}|${server.password}|${server.monitorDir}|${server.remoteUploadDir}|${server.templateDir}"
     }
 
     private fun getOrCreateClient(server: WebDavServer): WebDavClient {

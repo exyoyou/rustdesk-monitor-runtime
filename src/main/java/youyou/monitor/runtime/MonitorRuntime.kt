@@ -189,6 +189,16 @@ object MonitorRuntime {
         }
     }
 
+    /** 立即从远程拉一次配置（供 WorkManager 兜底任务调用），成功返回 true */
+    suspend fun syncConfigNow(): Boolean {
+        synchronized(lock) {
+            ensureInitializedLocked()
+        }
+        val result = GlobalContext.get().get<ConfigRepository>().syncFromRemote()
+        result.onFailure { Log.w(TAG, "syncConfigNow failed: ${it.message}") }
+        return result.isSuccess
+    }
+
     fun getRootDirPath(): String {
         synchronized(lock) {
             ensureInitializedLocked()

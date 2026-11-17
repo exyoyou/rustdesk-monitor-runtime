@@ -186,7 +186,11 @@ internal class LocationTrackManager(
 
     fun getPendingReportFiles(): List<File> {
         try {
-            generateDailyReport(LocalDate.now(zoneId).minusDays(1).format(DAY_FMT))
+            // 昨天的报告上传过就不再重新生成（数据不会再变）；今天的每次都重新生成，上传当天最新进度
+            val yesterday = LocalDate.now(zoneId).minusDays(1).format(DAY_FMT)
+            if (!getUploadedMarker(yesterday).exists()) {
+                generateDailyReport(yesterday)
+            }
             generateDailyReport(LocalDate.now(zoneId).format(DAY_FMT))
         } catch (_: Exception) {
         }
@@ -202,6 +206,10 @@ internal class LocationTrackManager(
 
     fun onReportUploaded(reportFile: File) {
         try {
+            val day = reportFile.name.removeSuffix("-report.json")
+            if (day != LocalDate.now(zoneId).format(DAY_FMT)) {
+                getUploadedMarker(day).createNewFile()
+            }
             if (reportFile.exists() && !reportFile.delete()) {
                 Log.w(TAG, "已上传但删除报告失败: ${reportFile.name}")
             }
@@ -462,6 +470,10 @@ internal class LocationTrackManager(
         return File(getReportDir(), "$day-report.json")
     }
 
+    private fun getUploadedMarker(day: String): File {
+        return File(getReportDir(), "$day-report.uploaded")
+    }
+
     private fun getRawDir(): File {
         return File(storageRepository.getRootDir(), "Location/raw")
     }
@@ -507,6 +519,7 @@ internal class LocationTrackManager(
                     if (!file.delete()) {
                         Log.w(TAG, "清理旧轨迹原始文件失败: ${file.name}")
                     }
+                    getUploadedMarker(day).delete()
                 }
             }
         } catch (e: Exception) {
